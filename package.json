@@ -1,0 +1,19 @@
+pv-pdf-generator/
+  package.json
+  server.js
+  db.js
+  pdf_fill.js
+  .env.example
+  templates/
+    pdf/
+      Monofase_BT_senza_accumulo_2.0 kW.pdf
+      Monofase_BT_senza_accumulo_3.0 kW.pdf
+      Monofase_BT_senza_accumulo_3.6 kW.pdf
+      Monofase_BT_senza_accumulo_5.0 kW.pdf
+      Monofase_BT_senza_accumulo_6.0 kW.pdf
+    txt/
+      cm 2.0 kW.txt
+      cm 3.0 kW.txt
+      cm 3.6 kW.txt
+      cm 5.0 kW.txt
+      cm 6.0 kW.txt
