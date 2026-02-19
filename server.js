@@ -17,45 +17,41 @@ app.use(express.json());
 const FORM_PASSWORD = process.env.FORM_PASSWORD || "1234";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "5678";
 
-const GMAIL_USER = process.env.GMAIL_USER;
-const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
+const GMAIL_USER = process.env.GMAIL_USER || "";
+const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || "";
 const MAIL_TO = process.env.MAIL_TO || "marianovbavaro@gmail.com";
 
-if (!process.env.DATABASE_URL) {
-  console.error("Missing DATABASE_URL env var");
-}
-
-// Render a volte fornisce postgresql://; pg accetta anche postgres://.
-// Qui normalizziamo.
+// Normalizza DATABASE_URL (Render spesso dà postgresql://)
 const DATABASE_URL = (process.env.DATABASE_URL || "").replace(/^postgresql:\/\//, "postgres://");
 
 // =====================
-// PATHS (FIX DEFINITIVO)
+// PATHS (IMPORTANTISSIMO: niente /src)
 // =====================
-// IMPORTANTISSIMO: usa process.cwd() così trova /templates anche su Render
 const BASE_TEMPLATES = path.join(process.cwd(), "templates");
-const PDF_TEMPLATES_DIR = path.join(BASE_TEMPLATES, "pdf");
-const TXT_TEMPLATES_DIR = path.join(BASE_TEMPLATES, "txt");
+const PDF_DIR = path.join(BASE_TEMPLATES, "pdf");
+const TXT_DIR = path.join(BASE_TEMPLATES, "txt");
 
-// mapping potenze
+// =====================
+// TEMPLATE MAP
+// =====================
 const PDF_TEMPLATES = {
-  "2": "Monofase_BT_senza_accumulo_2.0 kW.pdf",
-  "3": "Monofase_BT_senza_accumulo_3.0 kW.pdf",
+  "2.0": "Monofase_BT_senza_accumulo_2.0 kW.pdf",
+  "3.0": "Monofase_BT_senza_accumulo_3.0 kW.pdf",
   "3.6": "Monofase_BT_senza_accumulo_3.6 kW.pdf",
-  "5": "Monofase_BT_senza_accumulo_5.0 kW.pdf",
-  "6": "Monofase_BT_senza_accumulo_6.0 kW.pdf",
+  "5.0": "Monofase_BT_senza_accumulo_5.0 kW.pdf",
+  "6.0": "Monofase_BT_senza_accumulo_6.0 kW.pdf",
 };
 
 const TXT_TEMPLATES = {
-  "2": "cm 2.0 kW.txt",
-  "3": "cm 3.0 kW.txt",
+  "2.0": "cm 2.0 kW.txt",
+  "3.0": "cm 3.0 kW.txt",
   "3.6": "cm 3.6 kW.txt",
-  "5": "cm 5.0 kW.txt",
-  "6": "cm 6.0 kW.txt",
+  "5.0": "cm 5.0 kW.txt",
+  "6.0": "cm 6.0 kW.txt",
 };
 
 // =====================
-// BASIC AUTH (solo password, username qualsiasi)
+// AUTH (Basic Auth: username qualsiasi, password uguale a FORM_PASSWORD / ADMIN_PASSWORD)
 // =====================
 function basicAuth(expectedPassword) {
   return (req, res, next) => {
@@ -65,8 +61,8 @@ function basicAuth(expectedPassword) {
       return res.status(401).send("Auth richiesta");
     }
     const b64 = hdr.slice(6);
-    const parts = Buffer.from(b64, "base64").toString("utf8").split(":");
-    const pass = parts.length >= 2 ? parts.slice(1).join(":") : "";
+    const decoded = Buffer.from(b64, "base64").toString("utf8");
+    const pass = decoded.includes(":") ? decoded.split(":").slice(1).join(":") : "";
     if (pass !== expectedPassword) return res.status(403).send("Password errata");
     next();
   };
@@ -103,26 +99,70 @@ async function initDb() {
 }
 
 // =====================
-// EMAIL
+// EMAIL (non blocca mai: timeout)
 // =====================
 function mailTransport() {
-  if (!GMAIL_USER || !GMAIL_APP_PASSWORD) {
-    console.warn("GMAIL_USER or GMAIL_APP_PASSWORD not set (email disabled)");
-    return null;
-  }
+  if (!GMAIL_USER || !GMAIL_APP_PASSWORD) return null;
   return nodemailer.createTransport({
     service: "gmail",
     auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 15000,
   });
 }
 
+async function sendMailWithTimeout(transporter, mailOptions, ms = 15000) {
+  return await Promise.race([
+    transporter.sendMail(mailOptions),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Email timeout")), ms)),
+  ]);
+}
+
 // =====================
-// PDF GENERATION (overlay dati in alto a sinistra)
+// UTILS
 // =====================
 function safeFilename(s) {
   return String(s).replace(/[^\w.-]+/g, "_");
 }
 
+function normalizeKw(kw) {
+  const s = String(kw).trim();
+  if (!s) return "";
+  // se è "2" o "3" → "2.0" / "3.0"
+  if (!s.includes(".")) return `${s}.0`;
+  return s;
+}
+
+function htmlPage(title, body) {
+  return `<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>${title}</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu;max-width:900px;margin:40px auto;padding:0 16px}
+    label{display:block;margin-top:10px;font-weight:600}
+    input,select{width:100%;padding:10px;margin-top:6px}
+    button{margin-top:16px;padding:12px 16px;font-weight:700;cursor:pointer}
+    .ok{padding:12px;background:#e8ffe8;border:1px solid #9be19b}
+    .err{padding:12px;background:#ffe8e8;border:1px solid #e19b9b}
+    table{width:100%;border-collapse:collapse;margin-top:16px}
+    td,th{border:1px solid #ddd;padding:8px;text-align:left}
+    small{color:#555}
+  </style>
+</head>
+<body>
+  <h1>${title}</h1>
+  ${body}
+</body>
+</html>`;
+}
+
+// =====================
+// PDF GENERATION (overlay dati alto-sinistra)
+// =====================
 async function generatePdfFromTemplate(templatePath, input) {
   const templateBytes = fs.readFileSync(templatePath);
   const pdfDoc = await PDFDocument.load(templateBytes);
@@ -130,7 +170,7 @@ async function generatePdfFromTemplate(templatePath, input) {
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const page = pdfDoc.getPages()[0];
 
-  // coordinate (tarabili via ENV)
+  // tarabili via ENV se vuoi
   const x = Number(process.env.PDF_X || 55);
   const yTop = Number(process.env.PDF_Y_TOP || 770);
   const gap = Number(process.env.PDF_LINE_GAP || 14);
@@ -162,39 +202,13 @@ async function generatePdfFromTemplate(templatePath, input) {
 }
 
 // =====================
-// UI HTML
-// =====================
-function htmlPage(title, body) {
-  return `<!doctype html>
-<html lang="it">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>${title}</title>
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu;max-width:900px;margin:40px auto;padding:0 16px}
-    label{display:block;margin-top:10px;font-weight:600}
-    input,select{width:100%;padding:10px;margin-top:6px}
-    button{margin-top:16px;padding:12px 16px;font-weight:700;cursor:pointer}
-    .ok{padding:12px;background:#e8ffe8;border:1px solid #9be19b}
-    .err{padding:12px;background:#ffe8e8;border:1px solid #e19b9b}
-    table{width:100%;border-collapse:collapse;margin-top:16px}
-    td,th{border:1px solid #ddd;padding:8px;text-align:left}
-  </style>
-</head>
-<body>
-  <h1>${title}</h1>
-  ${body}
-</body>
-</html>`;
-}
-
-// =====================
 // ROUTES
 // =====================
+
 app.get("/", formAuth, (req, res) => {
   const body = `
-  <p>Compila i dati. Verrà generato PDF + TXT e inviato via email.</p>
+  <p>Compila i dati. Verrà generato PDF + TXT e archiviato. L’email (se configurata) parte senza bloccare la pagina.</p>
+
   <form method="POST" action="/submit">
     <label>Nome</label><input name="nome" required />
     <label>Cognome</label><input name="cognome" required />
@@ -212,15 +226,26 @@ app.get("/", formAuth, (req, res) => {
     </select>
     <button type="submit">Genera</button>
   </form>
+
   <p style="margin-top:18px">
-    Archivio: <a href="/admin">/admin</a>
+    Archivio protetto: <a href="/admin">/admin</a>
   </p>
+
+  <p><small>Cartelle richieste su GitHub: <code>templates/pdf</code> e <code>templates/txt</code>.</small></p>
   `;
   res.send(htmlPage("Generatore PDF FV", body));
 });
 
+// Alias: se qualche vecchia pagina punta a /generate
+app.post("/generate", formAuth, (req, res, next) => {
+  req.url = "/submit";
+  next();
+});
+
 app.post("/submit", formAuth, async (req, res) => {
   try {
+    console.log("STEP 1: start submit");
+
     const input = {
       nome: (req.body.nome || "").trim(),
       cognome: (req.body.cognome || "").trim(),
@@ -228,17 +253,22 @@ app.post("/submit", formAuth, async (req, res) => {
       comune: (req.body.comune || "").trim(),
       codice_fiscale: (req.body.codice_fiscale || "").trim(),
       pod: (req.body.pod || "").trim(),
-      potenza_kw: (req.body.potenza_kw || "").trim(),
+      potenza_kw: normalizeKw(req.body.potenza_kw || ""),
     };
 
     for (const k of Object.keys(input)) {
       if (!input[k]) throw new Error(`Campo mancante: ${k}`);
     }
 
-    if (!PDF_TEMPLATES[input.potenza_kw]) throw new Error("Potenza non valida");
+    if (!PDF_TEMPLATES[input.potenza_kw]) {
+      throw new Error(`Potenza non valida: ${input.potenza_kw}`);
+    }
 
-    const pdfTemplatePath = path.join(PDF_TEMPLATES_DIR, PDF_TEMPLATES[input.potenza_kw]);
-    const txtTemplatePath = path.join(TXT_TEMPLATES_DIR, TXT_TEMPLATES[input.potenza_kw]);
+    const pdfTemplatePath = path.join(PDF_DIR, PDF_TEMPLATES[input.potenza_kw]);
+    const txtTemplatePath = path.join(TXT_DIR, TXT_TEMPLATES[input.potenza_kw]);
+
+    console.log("PDF template path:", pdfTemplatePath);
+    console.log("TXT template path:", txtTemplatePath);
 
     if (!fs.existsSync(pdfTemplatePath)) {
       throw new Error(`Template PDF non trovato: ${pdfTemplatePath}`);
@@ -247,15 +277,18 @@ app.post("/submit", formAuth, async (req, res) => {
       throw new Error(`Template TXT non trovato: ${txtTemplatePath}`);
     }
 
+    console.log("STEP 2: templates ok");
+
     const pdfBytes = await generatePdfFromTemplate(pdfTemplatePath, input);
     const txtBytes = fs.readFileSync(txtTemplatePath);
+
+    console.log("STEP 3: pdf generated");
 
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     const base = safeFilename(`${input.cognome}_${input.nome}_${input.potenza_kw}kW_${ts}`);
     const pdfFilename = `${base}.pdf`;
     const txtFilename = `${base}.txt`;
 
-    // salva DB
     const saved = await pool.query(
       `INSERT INTO submissions
         (nome, cognome, indirizzo, comune, codice_fiscale, pod, potenza_kw,
@@ -268,14 +301,36 @@ app.post("/submit", formAuth, async (req, res) => {
       ]
     );
 
-    // invio email (se configurato)
-    const tx = mailTransport();
-    if (tx) {
-      await tx.sendMail({
-        from: `"PV Generator" <${GMAIL_USER}>`,
-        to: MAIL_TO,
-        subject: `FV ${input.potenza_kw} kW - ${input.cognome} ${input.nome} - POD ${input.pod}`,
-        text:
+    console.log("STEP 4: db saved", saved.rows[0].id);
+
+    // Rispondi SUBITO (così non si blocca mai)
+    res.send(
+      htmlPage(
+        "OK",
+        `<div class="ok">
+          Generato e archiviato. ID: <b>${saved.rows[0].id}</b><br/>
+          <a href="/admin">Vai all’archivio</a><br/>
+          <small>Invio email: in corso (se configurata).</small>
+        </div>
+        <p><a href="/">Torna al form</a></p>`
+      )
+    );
+
+    // Email in background con timeout
+    setTimeout(async () => {
+      try {
+        const tx = mailTransport();
+        if (!tx) return;
+
+        console.log("STEP 5: sending email");
+
+        await sendMailWithTimeout(
+          tx,
+          {
+            from: `"PV Generator" <${GMAIL_USER}>`,
+            to: MAIL_TO,
+            subject: `FV ${input.potenza_kw} kW - ${input.cognome} ${input.nome} - POD ${input.pod}`,
+            text:
 `Nuova pratica FV:
 Cliente: ${input.nome} ${input.cognome}
 CF: ${input.codice_fiscale}
@@ -284,26 +339,29 @@ POD: ${input.pod}
 Potenza: ${input.potenza_kw} kW
 ID DB: ${saved.rows[0].id}
 `,
-        attachments: [
-          { filename: pdfFilename, content: pdfBytes, contentType: "application/pdf" },
-          { filename: txtFilename, content: txtBytes, contentType: "text/plain; charset=utf-8" },
-        ],
-      });
-    }
+            attachments: [
+              { filename: pdfFilename, content: pdfBytes, contentType: "application/pdf" },
+              { filename: txtFilename, content: txtBytes, contentType: "text/plain; charset=utf-8" },
+            ],
+          },
+          15000
+        );
 
-    res.send(
-      htmlPage(
-        "OK",
-        `<div class="ok">
-          Generato correttamente. ID archivio: <b>${saved.rows[0].id}</b><br/>
-          <a href="/admin">Vai all’archivio</a>
-        </div>
-        <p><a href="/">Torna al form</a></p>`
-      )
-    );
+        console.log("STEP 6: email sent");
+      } catch (e) {
+        console.error("Email failed:", e.message || e);
+      }
+    }, 0);
+
   } catch (e) {
     console.error(e);
-    res.status(400).send(htmlPage("Errore", `<div class="err">${String(e.message || e)}</div><p><a href="/">Torna al form</a></p>`));
+    res.status(400).send(
+      htmlPage(
+        "Errore",
+        `<div class="err">Errore: ${String(e.message || e)}</div>
+         <p><a href="/">Torna indietro</a></p>`
+      )
+    );
   }
 });
 
@@ -362,7 +420,7 @@ app.get("/admin/:id/txt", adminAuth, async (req, res) => {
 });
 
 // =====================
-// START (non bloccare l'avvio se DB init fallisce)
+// START (non bloccare l’avvio se initDb fallisce)
 // =====================
 const PORT = Number(process.env.PORT || 3000);
 
