@@ -21,18 +21,18 @@ const GMAIL_USER = process.env.GMAIL_USER || "";
 const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || "";
 const MAIL_TO = process.env.MAIL_TO || "marianovbavaro@gmail.com";
 
-// Normalizza DATABASE_URL (Render spesso dà postgresql://)
+// Render spesso fornisce postgresql:// -> normalizziamo
 const DATABASE_URL = (process.env.DATABASE_URL || "").replace(/^postgresql:\/\//, "postgres://");
 
 // =====================
-// PATHS (IMPORTANTISSIMO: niente /src)
+// PATHS (NO /src ISSUES)
 // =====================
 const BASE_TEMPLATES = path.join(process.cwd(), "templates");
 const PDF_DIR = path.join(BASE_TEMPLATES, "pdf");
 const TXT_DIR = path.join(BASE_TEMPLATES, "txt");
 
 // =====================
-// TEMPLATE MAP
+// TEMPLATE MAP (NOMI ESATTI)
 // =====================
 const PDF_TEMPLATES = {
   "2.0": "Monofase_BT_senza_accumulo_2.0 kW.pdf",
@@ -51,22 +51,29 @@ const TXT_TEMPLATES = {
 };
 
 // =====================
-// AUTH (Basic Auth: username qualsiasi, password uguale a FORM_PASSWORD / ADMIN_PASSWORD)
+// BASIC AUTH (FORZA POPUP SEMPRE)
 // =====================
 function basicAuth(expectedPassword) {
   return (req, res, next) => {
-    const hdr = req.headers.authorization || "";
-    if (!hdr.startsWith("Basic ")) {
+    const ask = () => {
       res.setHeader("WWW-Authenticate", 'Basic realm="Protected"');
       return res.status(401).send("Auth richiesta");
-    }
+    };
+
+    const hdr = req.headers.authorization || "";
+    if (!hdr.startsWith("Basic ")) return ask();
+
     const b64 = hdr.slice(6);
     const decoded = Buffer.from(b64, "base64").toString("utf8");
     const pass = decoded.includes(":") ? decoded.split(":").slice(1).join(":") : "";
-    if (pass !== expectedPassword) return res.status(403).send("Password errata");
+
+    // NB: 401 anche se errata, così il browser mostra il popup e non “Password errata” secca
+    if (pass !== expectedPassword) return ask();
+
     next();
   };
 }
+
 const formAuth = basicAuth(FORM_PASSWORD);
 const adminAuth = basicAuth(ADMIN_PASSWORD);
 
@@ -126,11 +133,10 @@ function safeFilename(s) {
   return String(s).replace(/[^\w.-]+/g, "_");
 }
 
-function normalizeKw(kw) {
-  const s = String(kw).trim();
+function normalizeKw(v) {
+  const s = String(v || "").trim();
   if (!s) return "";
-  // se è "2" o "3" → "2.0" / "3.0"
-  if (!s.includes(".")) return `${s}.0`;
+  if (!s.includes(".")) return `${s}.0`; // 2 -> 2.0 ; 3 -> 3.0 ; 5 -> 5.0 ; 6 -> 6.0
   return s;
 }
 
@@ -161,7 +167,7 @@ function htmlPage(title, body) {
 }
 
 // =====================
-// PDF GENERATION (overlay dati alto-sinistra)
+// PDF GENERATION (overlay dati)
 // =====================
 async function generatePdfFromTemplate(templatePath, input) {
   const templateBytes = fs.readFileSync(templatePath);
@@ -170,7 +176,6 @@ async function generatePdfFromTemplate(templatePath, input) {
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const page = pdfDoc.getPages()[0];
 
-  // tarabili via ENV se vuoi
   const x = Number(process.env.PDF_X || 55);
   const yTop = Number(process.env.PDF_Y_TOP || 770);
   const gap = Number(process.env.PDF_LINE_GAP || 14);
@@ -204,6 +209,7 @@ async function generatePdfFromTemplate(templatePath, input) {
 // =====================
 // ROUTES
 // =====================
+app.get("/health", (req, res) => res.status(200).send("ok"));
 
 app.get("/", formAuth, (req, res) => {
   const body = `
@@ -231,12 +237,12 @@ app.get("/", formAuth, (req, res) => {
     Archivio protetto: <a href="/admin">/admin</a>
   </p>
 
-  <p><small>Cartelle richieste su GitHub: <code>templates/pdf</code> e <code>templates/txt</code>.</small></p>
+  <p><small>Struttura richiesta su GitHub: <code>templates/pdf</code> e <code>templates/txt</code>.</small></p>
   `;
   res.send(htmlPage("Generatore PDF FV", body));
 });
 
-// Alias: se qualche vecchia pagina punta a /generate
+// Alias per vecchi form: /generate -> /submit
 app.post("/generate", formAuth, (req, res, next) => {
   req.url = "/submit";
   next();
@@ -260,7 +266,7 @@ app.post("/submit", formAuth, async (req, res) => {
       if (!input[k]) throw new Error(`Campo mancante: ${k}`);
     }
 
-    if (!PDF_TEMPLATES[input.potenza_kw]) {
+    if (!PDF_TEMPLATES[input.potenza_kw] || !TXT_TEMPLATES[input.potenza_kw]) {
       throw new Error(`Potenza non valida: ${input.potenza_kw}`);
     }
 
@@ -270,12 +276,8 @@ app.post("/submit", formAuth, async (req, res) => {
     console.log("PDF template path:", pdfTemplatePath);
     console.log("TXT template path:", txtTemplatePath);
 
-    if (!fs.existsSync(pdfTemplatePath)) {
-      throw new Error(`Template PDF non trovato: ${pdfTemplatePath}`);
-    }
-    if (!fs.existsSync(txtTemplatePath)) {
-      throw new Error(`Template TXT non trovato: ${txtTemplatePath}`);
-    }
+    if (!fs.existsSync(pdfTemplatePath)) throw new Error(`Template PDF non trovato: ${pdfTemplatePath}`);
+    if (!fs.existsSync(txtTemplatePath)) throw new Error(`Template TXT non trovato: ${txtTemplatePath}`);
 
     console.log("STEP 2: templates ok");
 
@@ -303,7 +305,7 @@ app.post("/submit", formAuth, async (req, res) => {
 
     console.log("STEP 4: db saved", saved.rows[0].id);
 
-    // Rispondi SUBITO (così non si blocca mai)
+    // Risposta immediata (NO BLOCCO)
     res.send(
       htmlPage(
         "OK",
@@ -316,11 +318,14 @@ app.post("/submit", formAuth, async (req, res) => {
       )
     );
 
-    // Email in background con timeout
+    // Email in background
     setTimeout(async () => {
       try {
         const tx = mailTransport();
-        if (!tx) return;
+        if (!tx) {
+          console.log("Email disabled: missing GMAIL_USER / GMAIL_APP_PASSWORD");
+          return;
+        }
 
         console.log("STEP 5: sending email");
 
@@ -330,15 +335,7 @@ app.post("/submit", formAuth, async (req, res) => {
             from: `"PV Generator" <${GMAIL_USER}>`,
             to: MAIL_TO,
             subject: `FV ${input.potenza_kw} kW - ${input.cognome} ${input.nome} - POD ${input.pod}`,
-            text:
-`Nuova pratica FV:
-Cliente: ${input.nome} ${input.cognome}
-CF: ${input.codice_fiscale}
-Indirizzo: ${input.indirizzo}, ${input.comune}
-POD: ${input.pod}
-Potenza: ${input.potenza_kw} kW
-ID DB: ${saved.rows[0].id}
-`,
+            text: `Nuova pratica FV.\nID DB: ${saved.rows[0].id}`,
             attachments: [
               { filename: pdfFilename, content: pdfBytes, contentType: "application/pdf" },
               { filename: txtFilename, content: txtBytes, contentType: "text/plain; charset=utf-8" },
@@ -420,7 +417,7 @@ app.get("/admin/:id/txt", adminAuth, async (req, res) => {
 });
 
 // =====================
-// START (non bloccare l’avvio se initDb fallisce)
+// START
 // =====================
 const PORT = Number(process.env.PORT || 3000);
 
