@@ -1,5 +1,1 @@
-N.1 Inverter
-N.4 pannelli
-N.1 quadro di campo
-N.1 cavo da 20 mt.
-n.2 binari
+
